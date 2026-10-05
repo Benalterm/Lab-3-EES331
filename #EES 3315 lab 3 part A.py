@@ -1,20 +1,28 @@
-# EES 3315 lab 3 part A
+# EES 3315 Lab 3 Part A
 
-# Global variables & imports
 from pathlib import Path
 import pandas as pd
 
+# Constants
 hour_year = 8760
 day_year = 365
 month_year = 12
+grid_limit_MW = 100
+time_step_hours = 1
+shortfall_cost_per_MWh = 2000
 
 # Load the original CSV
 project_folder = Path(__file__).resolve().parent
 csv_path = project_folder / "Lab_Data.csv"
+output_path = project_folder / "lab_3_output.csv"
+
 data = pd.read_csv(csv_path)
 
-# Remove completely empty columns that create extra commas
+# Remove completely empty columns
 data = data.dropna(axis=1, how="all")
+
+if len(data) != hour_year:
+    raise ValueError(f"Expected {hour_year} rows, found {len(data)}.")
 
 # Start with the batch block off in every hour
 data["batch_on"] = 0
@@ -47,7 +55,7 @@ for (month, day), daily_rows in data.groupby(["month", "day"], sort=True):
             f"{int(month)}/{int(day)}: no complete 8-hour windows"
         )
 
-    # Mark the selected eight hours as batch_on = 1
+    # Mark the selected eight hours
     batch_indices = daily_rows.index[
         daily_rows["hour_of_day"].between(
             lowest_start_hour, lowest_start_hour + 7
@@ -55,15 +63,6 @@ for (month, day), daily_rows in data.groupby(["month", "day"], sort=True):
     ]
     data.loc[batch_indices, "batch_on"] = 1
 
-    # Optional: display the selected hours using 1–24 numbering
-    # first_hour = lowest_start_hour + 1
-    # last_hour = first_hour + 7
-    # print(
-    #     f"{int(month)}/{int(day)}: lowest 8-hour average = "
-    #     f"${lowest_average:.2f}/MWh (hours {first_hour}-{last_hour})"
-    # )
-
-# Calculate PUE using EACH ROW'S temperature
 # Calculate PUE separately for every hour
 data["PUE"] = 0.0
 
@@ -72,32 +71,77 @@ for h in range(hour_year):
 
     pue = min(
         1.10 + 0.005 * max(temperature - 55, 0),
-        1.30
+        1.30,
     )
 
     data.loc[h, "PUE"] = pue
-# Compute power and total facility demand for each hour
-    data["compute_MW"] = 80 + 20 * data["batch_on"]
-    data["demand_MW"] = data["compute_MW"] * data["PUE"]
 
+# Compute power and facility demand, including cooling
+data["compute_MW"] = 80 + 20 * data["batch_on"]
+data["demand_MW"] = data["compute_MW"] * data["PUE"]
 
-# Print functions for section 8 
-print((data["demand_MW"].sum())/1000, "GWh")  # Total energy demand in GWh
-print((data["compute_MW"].sum())/1000, "GWh")  # Compute energy demand in GWh
+# Step 1: grid only, no turbines or battery
+for h in range(hour_year):
+    demand = data.loc[h, "demand_MW"]
+    pue = data.loc[h, "PUE"]
 
-# locate the max hour and demand
+    # Facility power that cannot be supplied by the grid
+    total_shed = max(demand - grid_limit_MW, 0)
+
+    # Shed batch first, including its cooling
+    batch_demand = 20 * data.loc[h, "batch_on"] * pue
+    batch_shed = min(total_shed, batch_demand)
+    base_shed = total_shed - batch_shed
+
+    data.loc[h, "shed_facility_MW"] = total_shed
+    data.loc[h, "shed_batch_MW"] = batch_shed
+    data.loc[h, "shed_base_MW"] = base_shed
+    data.loc[h, "shed_compute_MW"] = total_shed / pue
+    data.loc[h, "import_MW"] = min(demand, grid_limit_MW)
+
+# Annual costs: MW × hours × $/MWh
+grid_cost = (
+    data["import_MW"] * time_step_hours * data["DA_LMP_$/MWh"]
+).sum()
+
+shortfall_cost = (
+    data["shed_compute_MW"].sum()
+    * time_step_hours
+    * shortfall_cost_per_MWh
+)
+
+# Count hours with shedding, ignoring tiny numerical noise
+tolerance = 1e-9
+hours_shed = (data["shed_facility_MW"] > tolerance).sum()
+hours_base_shed = (data["shed_base_MW"] > tolerance).sum()
+
+# Locate the first occurrence of maximum demand
 peak = data.loc[data["demand_MW"].idxmax()]
-print(f"Maximum demand: {peak['demand_MW']:.2f} MW")
+
+# Annual energy totals: MW × hours / 1000 = GWh
+to_GWh = time_step_hours / 1000
+
+print("\nSTEP 1: GRID ONLY")
+print(f"Facility demand: {data['demand_MW'].sum() * to_GWh:,.3f} GWh")
+print(f"Compute demand: {data['compute_MW'].sum() * to_GWh:,.3f} GWh")
+print(f"Grid imports: {data['import_MW'].sum() * to_GWh:,.3f} GWh")
+
+print(f"\nFacility shed: {data['shed_facility_MW'].sum() * to_GWh:,.3f} GWh")
+print(f"Batch shed: {data['shed_batch_MW'].sum() * to_GWh:,.3f} GWh")
+print(f"Base shed: {data['shed_base_MW'].sum() * to_GWh:,.3f} GWh")
+print(f"Compute shed: {data['shed_compute_MW'].sum() * to_GWh:,.3f} GWh")
+
+print(f"\nHours with any shed: {hours_shed:,}")
+print(f"Hours with base shed: {hours_base_shed:,}")
+
+print(f"\nGrid purchase cost: ${grid_cost:,.2f}")
+print(f"Compute shortfall cost: ${shortfall_cost:,.2f}")
+print(f"Mean PUE: {data['PUE'].mean():.4f}")
+
+print(f"\nMaximum demand: {peak['demand_MW']:.2f} MW")
 print(f"Date: {int(peak['month'])}/{int(peak['day'])}")
-print(f"Hour: {int(peak['hour_of_day'])}:00")
-######################### Sheding time 
+print(f"Hour: {int(peak['hour_of_day']):02d}:00")
 
-
-
-
-
-
-
-
-
-
+# Save hourly results to a separate CSV
+data.to_csv(output_path, index=False, float_format="%.4f")
+print(f"\nResults saved to: {output_path}")
