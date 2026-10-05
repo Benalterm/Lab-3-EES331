@@ -145,3 +145,6 @@ print(f"Hour: {int(peak['hour_of_day']):02d}:00")
 # Save hourly results to a separate CSV
 data.to_csv(output_path, index=False, float_format="%.4f")
 print(f"\nResults saved to: {output_path}")
+
+print(f"\nGas turbine results saved to: {gas_output_path}")
+
